@@ -1,0 +1,35 @@
+# 构建目录
+bin/
+build/
+*.o
+*.a
+
+# CMake 生成的文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+
+# 可执行文件
+user_sim_screen
+parse_json
+
+# 测试数据
+*.json
+
+# 压缩包
+*.tar.gz
+*.zip
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
