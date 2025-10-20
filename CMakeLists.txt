@@ -34,6 +34,7 @@ target_link_libraries(user_sim_screen
     PRIVATE 
     packet
     ${CMAKE_SOURCE_DIR}/libs/libnanomsg.a
+    anl
     pthread
     dl
     m
