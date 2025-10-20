@@ -32,12 +32,14 @@ cmake ..
 make
 
 # 可执行文件位于 bin/ 目录
+cd ..
 ```
 
-**快速编译（一键）：**
+**快速编译脚本：**
 
 ```bash
-cmake . && make
+# 使用提供的编译脚本
+./build.sh
 ```
 
 ### 使用方法
@@ -78,13 +80,19 @@ VarMon DATA: uint64_t:123, double:456.789, recv_num:1
 nng_test/
 ├── CMakeLists.txt              # 主构建配置
 ├── README.md                   # 项目说明文档
-├── user_sim_screen.c           # 主程序源码
-├── packet_header/              # 数据包解析模块
-│   ├── CMakeLists.txt          # packet 模块构建配置
-│   ├── packet_header.h         # 数据包头文件定义
-│   └── packet_header.c         # 数据包解析实现
+├── LICENSE                     # MIT 开源协议
+├── CONTRIBUTING.md             # 贡献指南
+├── build.sh                    # 一键构建脚本
+├── clean.sh                    # 清理脚本
+├── src/                        # 源代码目录
+│   ├── user_sim_screen.c       # 主程序源码
+│   └── packet_header/          # 数据包解析模块
+│       ├── CMakeLists.txt      # packet 模块构建配置
+│       ├── packet_header.h     # 数据包头文件定义
+│       └── packet_header.c     # 数据包解析实现
 ├── libs/                       # 依赖库
 │   └── libnanomsg.a            # nanomsg 静态库
+├── build/                      # 构建目录（CMake中间文件）
 └── bin/                        # 可执行文件输出目录（构建后生成）
 ```
 
@@ -102,12 +110,21 @@ taskset -c 0-3 ./bin/user_sim_screen tcp://0.0.0.0:11112
 numactl --cpunodebind=0 --membind=0 ./bin/user_sim_screen tcp://0.0.0.0:11112
 ```
 
+### 清理构建
+
+```bash
+# 清理所有构建产物
+./clean.sh
+```
+
 ### 编译优化
 
 ```bash
 # Release 模式编译（启用 -O3 优化）
-cmake -DCMAKE_BUILD_TYPE=Release .
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
 make
+cd ..
 ```
 
 ### 高级优化

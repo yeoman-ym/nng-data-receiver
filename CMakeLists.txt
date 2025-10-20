@@ -21,13 +21,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 link_directories(${CMAKE_SOURCE_DIR}/libs)
 
 # 包含头文件目录
-include_directories(${CMAKE_SOURCE_DIR}/packet_header)
+include_directories(${CMAKE_SOURCE_DIR}/src/packet_header)
 
 # 添加 packet_header 子目录（生成静态库）
-add_subdirectory(packet_header)
+add_subdirectory(src/packet_header)
 
 # 创建主可执行文件
-add_executable(user_sim_screen user_sim_screen.c)
+add_executable(user_sim_screen src/user_sim_screen.c)
 
 # 链接库
 target_link_libraries(user_sim_screen 
