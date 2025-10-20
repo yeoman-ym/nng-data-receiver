@@ -3,6 +3,8 @@ bin/
 build/
 *.o
 *.a
+# 但保留 libs 目录下的静态库
+!libs/*.a
 
 # CMake 生成的文件
 CMakeCache.txt
