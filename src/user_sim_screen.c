@@ -87,6 +87,16 @@ void fatal(const char* func)
     exit(1);
 }
 
+// 将网络字节序的double转换为主机字节序
+static inline double be64toh_double(const void* ptr) {
+    uint64_t temp;
+    memcpy(&temp, ptr, sizeof(uint64_t));
+    temp = be64toh(temp);
+    double result;
+    memcpy(&result, &temp, sizeof(double));
+    return result;
+}
+
 
 
 void  parse_record_finish(const char *buf, size_t buf_size){
@@ -128,12 +138,15 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
     // 第一部分：nanomsg头 (24字节)
     const nanomsg_header_t *nanomsg_hdr = (const nanomsg_header_t *)buf;
     
-    // 第二部分：变量监控特有消息头 (24字节)
-    const varmon_header_t *varmon_hdr = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
+    // 第二部分：变量监控特有消息头 (24字节) - 需要进行大小端转换
+    const varmon_header_t *varmon_hdr_raw = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
+    uint64_t unit_num = be64toh(varmon_hdr_raw->unit_num);
+    uint64_t record_start_id = be64toh(varmon_hdr_raw->record_start_id);
+    uint64_t record_end_id = be64toh(varmon_hdr_raw->record_end_id);
     
-    // 第三部分：当前变量的步长 (8字节)
+    // 第三部分：当前变量的步长 (8字节) - 需要进行大小端转换
     const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
-    uint64_t current_step = *step_ptr;
+    uint64_t current_step = be64toh(*step_ptr);
     
     // 第四部分：多个数据
     const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
@@ -143,9 +156,9 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
     {
         case FUNCTION_META:
             printf("VarMon META:\n");
-            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
-            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
-            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  unit_num: %lu\n", unit_num);
+            printf("  record_start_id: %lu\n", record_start_id);
+            printf("  record_end_id: %lu\n", record_end_id);
             printf("  step: %lu\n", current_step);
             if(data_size > 0){
                 printf("  meta_data: %.*s\n", (int)data_size, data_ptr);
@@ -155,29 +168,31 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
         case FUNCTION_DATA:
             recv_num++;
             printf("VarMon DATA:\n");
-            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
-            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
-            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  unit_num: %lu\n", unit_num);
+            printf("  record_start_id: %lu\n", record_start_id);
+            printf("  record_end_id: %lu\n", record_end_id);
             printf("  step: %lu\n", current_step);
             printf("  recv_num: %llu\n", recv_num);
             
-            // 根据监控单元数量解析多个数据
-            if(varmon_hdr->unit_num > 0 && data_size >= sizeof(double) * varmon_hdr->unit_num){
-                printf("  data values (%lu units): ", varmon_hdr->unit_num);
-                for(uint64_t i = 0; i < varmon_hdr->unit_num; i++){
-                    double value;
-                    memcpy(&value, data_ptr + i * sizeof(double), sizeof(double));
+            // 根据监控单元数量解析多个数据（需要进行大小端转换）
+            if(unit_num > 0 && data_size >= sizeof(double) * unit_num){
+                printf("  data values (%lu units): ", unit_num);
+                for(uint64_t i = 0; i < unit_num; i++){
+                    double value = be64toh_double(data_ptr + i * sizeof(double));
                     printf("%lf ", value);
                 }
                 printf("\n");
+            } else {
+                printf("  [WARNING] data_size=%zu, expected=%zu, unit_num=%lu\n", 
+                       data_size, sizeof(double) * unit_num, unit_num);
             }
             break;
             
         case FUNCTION_FINISH:
             printf("VarMon FINISH:\n");
-            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
-            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
-            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  unit_num: %lu\n", unit_num);
+            printf("  record_start_id: %lu\n", record_start_id);
+            printf("  record_end_id: %lu\n", record_end_id);
             printf("  step: %lu\n", current_step);
             if(data_size > 0){
                 printf("  finish_data: %.*s\n", (int)data_size, data_ptr);
