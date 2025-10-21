@@ -22,6 +22,143 @@
 
 int sock;
 
+// -------------------- 元数据解析与缓存 --------------------
+typedef struct {
+    char     name[128];      // 变量名
+    char     type[32];       // 变量类型字符串，如 CSG_DOUBLE/CSG_UINT8 等
+    size_t   size;           // 变量字节数
+} var_def_t;
+
+typedef struct {
+    size_t    unit_size;     // variable_monitor_unit_bytes
+    size_t    var_count;     // 变量个数
+    var_def_t vars[64];      // 简易上限，足够一般使用
+} meta_cache_t;
+
+static meta_cache_t g_meta_cache = {0};
+
+static inline void reset_meta_cache(meta_cache_t* cache) {
+    memset(cache, 0, sizeof(*cache));
+}
+
+// 在 json 文本中查找 key 对应的无符号整数值（十进制），找不到则返回 default_value
+static size_t parse_number_value(const char* json, const char* key, size_t default_value) {
+    if (json == NULL || key == NULL) return default_value;
+    const char* p = strstr(json, key);
+    if (!p) return default_value;
+    p += strlen(key);
+    // 向后找到冒号
+    p = strchr(p, ':');
+    if (!p) return default_value;
+    p++;
+    // 跳过空白
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    // 读取数字
+    char* endptr = NULL;
+    unsigned long long v = strtoull(p, &endptr, 10);
+    if (endptr == p) return default_value;
+    return (size_t)v;
+}
+
+// 从 pos 开始解析形如 "key":"value" 的字符串值，写入 dst（带边界）
+static int parse_string_value_after(const char* pos, const char* key, char* dst, size_t dst_cap) {
+    const char* p = strstr(pos, key);
+    if (!p) return 0;
+    p += strlen(key);
+    p = strchr(p, ':');
+    if (!p) return 0;
+    p++;
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    if (*p != '"') return 0;
+    p++;
+    const char* q = strchr(p, '"');
+    if (!q) return 0;
+    size_t n = (size_t)(q - p);
+    if (n >= dst_cap) n = dst_cap - 1;
+    memcpy(dst, p, n);
+    dst[n] = '\0';
+    return 1;
+}
+
+// 解析 variables 数组，填充 g_meta_cache.vars，返回解析到的数量
+static size_t parse_variables_from_meta(const char* json, meta_cache_t* cache) {
+    if (!json || !cache) return 0;
+    const char* p = json;
+    size_t count = 0;
+    while ((p = strstr(p, "\"name\"")) && count < (sizeof(cache->vars)/sizeof(cache->vars[0]))) {
+        var_def_t* vd = &cache->vars[count];
+        // name
+        if (!parse_string_value_after(p, "\"name\"", vd->name, sizeof(vd->name))) break;
+        // type（从 name 后面开始找）
+        parse_string_value_after(p, "\"type\"", vd->type, sizeof(vd->type));
+        // size（从 name 后面开始找）
+        vd->size = parse_number_value(p, "\"size\"", 0);
+        if (vd->size == 0) vd->size = 0;
+        count++;
+        // 跳过本对象，移动到下一个 name
+        const char* next = strstr(p + 6, "\"name\"");
+        if (!next) break;
+        p = next;
+    }
+    cache->var_count = count;
+    return count;
+}
+
+// 根据类型字符串与字节数打印一个值；如未知类型则按 hex 打印
+static void print_value_by_type(const char* name, const char* type, const char* data, size_t size) {
+    if (type && strstr(type, "DOUBLE") && size == sizeof(double)) {
+        double dv;
+        memcpy(&dv, data, sizeof(double));
+        printf("%s=%lf", name, dv);
+        return;
+    }
+    if (type && strstr(type, "UINT64") && size == sizeof(uint64_t)) {
+        uint64_t v; memcpy(&v, data, sizeof(uint64_t));
+        printf("%s=%lu", name, (unsigned long)v);
+        return;
+    }
+    if (type && strstr(type, "INT64") && size == sizeof(int64_t)) {
+        int64_t v; memcpy(&v, data, sizeof(int64_t));
+        printf("%s=%ld", name, (long)v);
+        return;
+    }
+    if (type && strstr(type, "UINT32") && size == sizeof(uint32_t)) {
+        uint32_t v; memcpy(&v, data, sizeof(uint32_t));
+        printf("%s=%u", name, v);
+        return;
+    }
+    if (type && strstr(type, "INT32") && size == sizeof(int32_t)) {
+        int32_t v; memcpy(&v, data, sizeof(int32_t));
+        printf("%s=%d", name, v);
+        return;
+    }
+    if (type && strstr(type, "UINT16") && size == sizeof(uint16_t)) {
+        uint16_t v; memcpy(&v, data, sizeof(uint16_t));
+        printf("%s=%u", name, (unsigned)v);
+        return;
+    }
+    if (type && strstr(type, "INT16") && size == sizeof(int16_t)) {
+        int16_t v; memcpy(&v, data, sizeof(int16_t));
+        printf("%s=%d", name, (int)v);
+        return;
+    }
+    if (type && strstr(type, "UINT8") && size == sizeof(uint8_t)) {
+        uint8_t v; memcpy(&v, data, sizeof(uint8_t));
+        printf("%s=%u", name, (unsigned)v);
+        return;
+    }
+    if (type && strstr(type, "INT8") && size == sizeof(int8_t)) {
+        int8_t v; memcpy(&v, data, sizeof(int8_t));
+        printf("%s=%d", name, (int)v);
+        return;
+    }
+    // 未识别的类型，按十六进制输出
+    printf("%s=0x", name);
+    for (size_t i = 0; i < size; i++) {
+        printf("%02x", (unsigned char)data[i]);
+    }
+}
+
 void ctrlc_handle(int sig)
 {
     size_t size, i;
@@ -165,39 +302,44 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             printf("    node_id: %u\n", ntohs(nanomsg_hdr->node_id));               // 网络字节序
             printf("    task_id: %lu\n", be64toh(nanomsg_hdr->task_id));            // 网络字节序
             printf("    cmd_id: %lu\n", be64toh(nanomsg_hdr->cmd_id));              // 网络字节序
-            printf("  [变量监控特有消息头]\n");
-            printf("    unit_num: %lu\n", unit_num);
-            printf("    record_start_id: %lu\n", record_start_id);
-            printf("    record_end_id: %lu\n", record_end_id);
-            printf("  [步长]\n");
-            printf("    step: %lu\n", current_step);
             if(data_size > 0){
                 printf("  [元数据内容]\n");
                 printf("    meta_data: %.*s\n", (int)data_size, data_ptr);
+
+                // 解析并缓存元数据（通用方案）
+                reset_meta_cache(&g_meta_cache);
+                g_meta_cache.unit_size = parse_number_value(data_ptr, "\"variable_monitor_unit_bytes\"", 0);
+                size_t parsed = parse_variables_from_meta(data_ptr, &g_meta_cache);
+                printf("  [已缓存元数据] unit_size=%zu, var_count=%zu\n", g_meta_cache.unit_size, g_meta_cache.var_count);
+                for(size_t i = 0; i < g_meta_cache.var_count; i++){
+                    printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, g_meta_cache.vars[i].name, g_meta_cache.vars[i].type, g_meta_cache.vars[i].size);
+                }
             }
             break;
             
         case FUNCTION_DATA:
             recv_num++;
-            printf("VarMon DATA:\n");
-            printf("  unit_num: %lu\n", unit_num);
-            printf("  record_start_id: %lu\n", record_start_id);
-            printf("  record_end_id: %lu\n", record_end_id);
-            printf("  step: %lu\n", current_step);
-            printf("  recv_num: %llu\n", recv_num);
+            printf("VarMon DATA [step=%lu]:\n", current_step);
             
-            // 根据监控单元数量解析多个数据
-            if(unit_num > 0 && data_size >= sizeof(double) * unit_num){
-                printf("  data values (%lu units): ", unit_num);
-                for(uint64_t i = 0; i < unit_num; i++){
-                    double value;
-                    memcpy(&value, data_ptr + i * sizeof(double), sizeof(double));
-                    printf("%lf ", value);
+            if(unit_num > 0 && data_size > 0){
+                // 单元数量固定为1时，直接使用缓存的 unit_size，否则以总长/数量估算
+                size_t unit_size = g_meta_cache.unit_size > 0 ? g_meta_cache.unit_size : (data_size / unit_num);
+
+                size_t offset = 0;
+                // 打印：变量名=值（按缓存的 size 与 type 解码），每个变量独立一行
+                for(size_t vi = 0; vi < g_meta_cache.var_count; vi++){
+                    const var_def_t* vd = &g_meta_cache.vars[vi];
+                    if(offset + vd->size > data_size){
+                        printf("  [WARNING] 数据不足: %s 需要%zu字节, 剩余%zu\n", vd->name, vd->size, data_size - offset);
+                        break;
+                    }
+                    printf("  ");
+                    print_value_by_type(vd->name, vd->type, data_ptr + offset, vd->size);
+                    printf("\n");
+                    offset += vd->size;
                 }
-                printf("\n");
             } else {
-                printf("  [WARNING] data_size=%zu, expected=%zu, unit_num=%lu\n", 
-                       data_size, sizeof(double) * unit_num, unit_num);
+                printf("  [WARNING] data_size=%zu, unit_num=%lu\n", data_size, unit_num);
             }
             break;
             
