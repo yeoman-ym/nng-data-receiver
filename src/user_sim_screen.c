@@ -275,30 +275,11 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
         return;
     }
     
-    // 检查最小长度：nanomsg头(24) + varmon头(24) + 步长(8) = 56字节
-    if(buf_size < PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t)){
-        printf("VarMon packet too short: %zu bytes\n", buf_size);
-        return;
-    }
-    
-    static unsigned long long recv_num = 0;
-    
     // 第一部分：nanomsg头 (24字节)
     const nanomsg_header_t *nanomsg_hdr = (const nanomsg_header_t *)buf;
-    
-    // 第二部分：变量监控特有消息头 (24字节) - 标记为网络字节序的字段需要转换
-    const varmon_header_t *varmon_hdr_raw = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
-    uint64_t unit_num = be64toh(varmon_hdr_raw->unit_num);           // 网络字节序
-    uint64_t record_start_id = be64toh(varmon_hdr_raw->record_start_id); // 网络字节序
-    uint64_t record_end_id = be64toh(varmon_hdr_raw->record_end_id);     // 网络字节序
-    
-    // 第三部分：当前变量的步长 (8字节)
-    const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
-    uint64_t current_step = *step_ptr;
-    
-    // 第四部分：多个数据
-    const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
-    size_t data_size = buf_size - PACKET_HEADER_SIZE - VARMON_HEADER_SIZE - sizeof(uint64_t);
+    // 通用：指向通用头之后的负载区（META/FINISH 多为纯文本）
+    const char *body_after_header = buf + PACKET_HEADER_SIZE;
+    size_t body_after_header_size = buf_size - PACKET_HEADER_SIZE;
     
     switch (nanomsg_hdr->event_id)
     {
@@ -313,15 +294,15 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             printf("    node_id: %u\n", ntohs(nanomsg_hdr->node_id));               // 网络字节序
             printf("    task_id: %lu\n", be64toh(nanomsg_hdr->task_id));            // 网络字节序
             printf("    cmd_id: %lu\n", be64toh(nanomsg_hdr->cmd_id));              // 网络字节序
-            if(data_size > 0){
+            if(body_after_header_size > 0){
                 printf("  [元数据内容]\n");
-                printf("    meta_data: %.*s\n", (int)data_size, data_ptr);
+                printf("    meta_data: %.*s\n", (int)body_after_header_size, body_after_header);
 
                 // 解析并缓存元数据（通用方案）
                 reset_meta_cache(&g_meta_cache);
-                g_meta_cache.unit_size = parse_number_value(data_ptr, "\"variable_monitor_unit_bytes\"", 0);
-                g_meta_cache.interval_steps = parse_number_value(data_ptr, "\"interval_steps\"", 0);
-                size_t parsed = parse_variables_from_meta(data_ptr, &g_meta_cache);
+                g_meta_cache.unit_size = parse_number_value(body_after_header, "\"variable_monitor_unit_bytes\"", 0);
+                g_meta_cache.interval_steps = parse_number_value(body_after_header, "\"interval_steps\"", 0);
+                parse_variables_from_meta(body_after_header, &g_meta_cache);
                 printf("  [已缓存元数据] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", g_meta_cache.unit_size, g_meta_cache.interval_steps, g_meta_cache.var_count);
                 for(size_t i = 0; i < g_meta_cache.var_count; i++){
                     printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, g_meta_cache.vars[i].name, g_meta_cache.vars[i].type, g_meta_cache.vars[i].size);
@@ -330,13 +311,24 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             break;
             
         case FUNCTION_DATA:
-            recv_num++;
+            // DATA 需要满足最小长度（含 varmon 头 + 步长）
+            if (buf_size < PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t)){
+                printf("VarMon DATA packet too short: %zu bytes\n", buf_size);
+                break;
+            }
             {
+                // 解析变量监控头与步长
+                const varmon_header_t *varmon_hdr_raw = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
+                uint64_t unit_num = be64toh(varmon_hdr_raw->unit_num);
+                const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
+                uint64_t current_step = *step_ptr;
                 uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
                 printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, g_meta_cache.interval_steps);
-            }
-            
-            if(unit_num > 0 && data_size > 0){
+
+                const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
+                size_t data_size = buf_size - PACKET_HEADER_SIZE - VARMON_HEADER_SIZE - sizeof(uint64_t);
+
+                if(unit_num > 0 && data_size > 0){
                 // 单元数量固定为1；数据区不含 steps，本地步数来自头部 current_step
                 // 若元数据携带 unit_size，则以其为准，否则按缓存的变量 size 累计
                 size_t expected_by_vars = 0;
@@ -362,19 +354,16 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                     printf("\n");
                     offset += vd->size;
                 }
-            } else {
-                printf("  [WARNING] data_size=%zu, unit_num=%lu\n", data_size, unit_num);
+                } else {
+                    printf("  [WARNING] data_size=%zu, unit_num=%lu\n", data_size, unit_num);
+                }
             }
             break;
             
         case FUNCTION_FINISH:
-            printf("VarMon FINISH:\n");
-            printf("  unit_num: %lu\n", unit_num);
-            printf("  record_start_id: %lu\n", record_start_id);
-            printf("  record_end_id: %lu\n", record_end_id);
-            printf("  step: %lu\n", current_step);
-            if(data_size > 0){
-                printf("  finish_data: %.*s\n", (int)data_size, data_ptr);
+            printf("VarMon FINISH\n");
+            if(body_after_header_size > 0){
+                printf("  finish_data: %.*s\n", (int)body_after_header_size, body_after_header);
             }
             break;
             
