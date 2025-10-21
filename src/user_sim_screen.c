@@ -27,6 +27,7 @@ typedef struct {
     char     name[128];      // 变量名
     char     type[32];       // 变量类型字符串，如 CSG_DOUBLE/CSG_UINT8 等
     size_t   size;           // 变量字节数
+    int      is_step;        // 是否为 steps 字段（不在数据区内，单独在头里）
 } var_def_t;
 
 typedef struct {
@@ -86,15 +87,24 @@ static size_t parse_variables_from_meta(const char* json, meta_cache_t* cache) {
     const char* p = json;
     size_t count = 0;
     while ((p = strstr(p, "\"name\"")) && count < (sizeof(cache->vars)/sizeof(cache->vars[0]))) {
-        var_def_t* vd = &cache->vars[count];
-        // name
-        if (!parse_string_value_after(p, "\"name\"", vd->name, sizeof(vd->name))) break;
-        // type（从 name 后面开始找）
-        parse_string_value_after(p, "\"type\"", vd->type, sizeof(vd->type));
-        // size（从 name 后面开始找）
-        vd->size = parse_number_value(p, "\"size\"", 0);
-        if (vd->size == 0) vd->size = 0;
-        count++;
+        // 暂存一个对象，判断是否是 steps，steps 不进入数据区变量列表
+        char name_buf[128] = {0};
+        char type_buf[32]  = {0};
+        size_t size_val    = 0;
+
+        if (!parse_string_value_after(p, "\"name\"", name_buf, sizeof(name_buf))) break;
+        parse_string_value_after(p, "\"type\"", type_buf, sizeof(type_buf));
+        size_val = parse_number_value(p, "\"size\"", 0);
+
+        int is_step = (strcmp(name_buf, "steps") == 0);
+        if (!is_step) {
+            var_def_t* vd = &cache->vars[count];
+            strncpy(vd->name, name_buf, sizeof(vd->name)-1);
+            strncpy(vd->type, type_buf, sizeof(vd->type)-1);
+            vd->size = size_val;
+            vd->is_step = 0;
+            count++;
+        }
         // 跳过本对象，移动到下一个 name
         const char* next = strstr(p + 6, "\"name\"");
         if (!next) break;
@@ -322,11 +332,20 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             printf("VarMon DATA [step=%lu]:\n", current_step);
             
             if(unit_num > 0 && data_size > 0){
-                // 单元数量固定为1时，直接使用缓存的 unit_size，否则以总长/数量估算
-                size_t unit_size = g_meta_cache.unit_size > 0 ? g_meta_cache.unit_size : (data_size / unit_num);
+                // 单元数量固定为1；数据区不含 steps，本地步数来自头部 current_step
+                // 若元数据携带 unit_size，则以其为准，否则按缓存的变量 size 累计
+                size_t expected_by_vars = 0;
+                for(size_t vi = 0; vi < g_meta_cache.var_count; vi++){
+                    expected_by_vars += g_meta_cache.vars[vi].size;
+                }
+                size_t unit_size = g_meta_cache.unit_size ? g_meta_cache.unit_size : expected_by_vars;
+
+                if (data_size < unit_size) {
+                    printf("  [WARNING] 数据总长度不足: data_size=%zu < unit_size=%zu\n", data_size, unit_size);
+                }
 
                 size_t offset = 0;
-                // 打印：变量名=值（按缓存的 size 与 type 解码），每个变量独立一行
+                // 打印变量名=值（按缓存的 size 与 type 解码），不包含 steps
                 for(size_t vi = 0; vi < g_meta_cache.var_count; vi++){
                     const var_def_t* vd = &g_meta_cache.vars[vi];
                     if(offset + vd->size > data_size){
