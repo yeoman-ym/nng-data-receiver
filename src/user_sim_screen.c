@@ -16,7 +16,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <errno.h>
-#include "packet_header.h"
+#include "packet_header/packet_header.h"
 
 #define MAX_BUFFER_SIZE 4096
 
@@ -116,30 +116,78 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
         printf("buf is null\n");
         return;
     }
+    
+    // 检查最小长度：nanomsg头(24) + varmon头(24) + 步长(8) = 56字节
+    if(buf_size < PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t)){
+        printf("VarMon packet too short: %zu bytes\n", buf_size);
+        return;
+    }
+    
     static unsigned long long recv_num = 0;
-    double data_value_double;
-    uint64_t data_value_uint64;
-    const char *body = buf + PACKET_HEADER_SIZE + 8;  // 跳过消息头和步数
-    const char *head = buf + PACKET_HEADER_SIZE;  // 跳过消息头
-    size_t body_size = buf_size - PACKET_HEADER_SIZE;
-    switch (buf[2])
+    
+    // 第一部分：nanomsg头 (24字节)
+    const nanomsg_header_t *nanomsg_hdr = (const nanomsg_header_t *)buf;
+    
+    // 第二部分：变量监控特有消息头 (24字节)
+    const varmon_header_t *varmon_hdr = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
+    
+    // 第三部分：当前变量的步长 (8字节)
+    const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
+    uint64_t current_step = *step_ptr;
+    
+    // 第四部分：多个数据
+    const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
+    size_t data_size = buf_size - PACKET_HEADER_SIZE - VARMON_HEADER_SIZE - sizeof(uint64_t);
+    
+    switch (nanomsg_hdr->event_id)
     {
         case FUNCTION_META:
-            printf("VarMon META: %.*s\n", (int)body_size, head);
+            printf("VarMon META:\n");
+            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
+            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
+            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  step: %lu\n", current_step);
+            if(data_size > 0){
+                printf("  meta_data: %.*s\n", (int)data_size, data_ptr);
+            }
             break;
+            
         case FUNCTION_DATA:
-            memcpy(&data_value_uint64, body, sizeof(uint64_t));
-            memcpy(&data_value_double, body, sizeof(double));
             recv_num++;
-            printf("VarMon DATA: uint64_t:%lu, double:%lf, recv_num:%llu\n", data_value_uint64, data_value_double, recv_num);
+            printf("VarMon DATA:\n");
+            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
+            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
+            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  step: %lu\n", current_step);
+            printf("  recv_num: %llu\n", recv_num);
+            
+            // 根据监控单元数量解析多个数据
+            if(varmon_hdr->unit_num > 0 && data_size >= sizeof(double) * varmon_hdr->unit_num){
+                printf("  data values (%lu units): ", varmon_hdr->unit_num);
+                for(uint64_t i = 0; i < varmon_hdr->unit_num; i++){
+                    double value;
+                    memcpy(&value, data_ptr + i * sizeof(double), sizeof(double));
+                    printf("%lf ", value);
+                }
+                printf("\n");
+            }
             break;
+            
         case FUNCTION_FINISH:
-            printf("VarMon FINISH: %.*s\n", (int)body_size, head);
+            printf("VarMon FINISH:\n");
+            printf("  unit_num: %lu\n", varmon_hdr->unit_num);
+            printf("  record_start_id: %lu\n", varmon_hdr->record_start_id);
+            printf("  record_end_id: %lu\n", varmon_hdr->record_end_id);
+            printf("  step: %lu\n", current_step);
+            if(data_size > 0){
+                printf("  finish_data: %.*s\n", (int)data_size, data_ptr);
+            }
             break;
+            
         default:
-            printf("[###UNKNOWN var mon type %d###]\n",buf[2]);
+            printf("[###UNKNOWN var mon type %d###]\n", nanomsg_hdr->event_id);
             break;
-        }
+    }
 }
 
 void  parse_read_data(const char *buf, size_t buf_size){

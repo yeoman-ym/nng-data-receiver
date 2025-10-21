@@ -71,5 +71,14 @@ typedef struct {
     uint64_t cmd_id;
 }nanomsg_header_t;
 
+// 变量监控特有消息头，24字节
+typedef struct {
+    uint64_t unit_num;        // 监控单元的数量
+    uint64_t record_start_id; // 记录的起始ID
+    uint64_t record_end_id;   // 记录的结束ID
+}varmon_header_t;
+
+#define VARMON_HEADER_SIZE 24
+
 
 #endif
