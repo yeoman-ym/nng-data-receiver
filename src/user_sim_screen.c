@@ -34,6 +34,7 @@ typedef struct {
     size_t    unit_size;     // variable_monitor_unit_bytes
     size_t    var_count;     // 变量个数
     var_def_t vars[64];      // 简易上限，足够一般使用
+    size_t    interval_steps; // 从元数据解析的间隔步数
 } meta_cache_t;
 
 static meta_cache_t g_meta_cache = {0};
@@ -319,8 +320,9 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 // 解析并缓存元数据（通用方案）
                 reset_meta_cache(&g_meta_cache);
                 g_meta_cache.unit_size = parse_number_value(data_ptr, "\"variable_monitor_unit_bytes\"", 0);
+                g_meta_cache.interval_steps = parse_number_value(data_ptr, "\"interval_steps\"", 0);
                 size_t parsed = parse_variables_from_meta(data_ptr, &g_meta_cache);
-                printf("  [已缓存元数据] unit_size=%zu, var_count=%zu\n", g_meta_cache.unit_size, g_meta_cache.var_count);
+                printf("  [已缓存元数据] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", g_meta_cache.unit_size, g_meta_cache.interval_steps, g_meta_cache.var_count);
                 for(size_t i = 0; i < g_meta_cache.var_count; i++){
                     printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, g_meta_cache.vars[i].name, g_meta_cache.vars[i].type, g_meta_cache.vars[i].size);
                 }
@@ -329,7 +331,10 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             
         case FUNCTION_DATA:
             recv_num++;
-            printf("VarMon DATA [step=%lu]:\n", current_step);
+            {
+                uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
+                printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, g_meta_cache.interval_steps);
+            }
             
             if(unit_num > 0 && data_size > 0){
                 // 单元数量固定为1；数据区不含 steps，本地步数来自头部 current_step
