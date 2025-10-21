@@ -138,15 +138,15 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
     // 第一部分：nanomsg头 (24字节)
     const nanomsg_header_t *nanomsg_hdr = (const nanomsg_header_t *)buf;
     
-    // 第二部分：变量监控特有消息头 (24字节) - 需要进行大小端转换
+    // 第二部分：变量监控特有消息头 (24字节) - 标记为网络字节序的字段需要转换
     const varmon_header_t *varmon_hdr_raw = (const varmon_header_t *)(buf + PACKET_HEADER_SIZE);
-    uint64_t unit_num = be64toh(varmon_hdr_raw->unit_num);
-    uint64_t record_start_id = be64toh(varmon_hdr_raw->record_start_id);
-    uint64_t record_end_id = be64toh(varmon_hdr_raw->record_end_id);
+    uint64_t unit_num = be64toh(varmon_hdr_raw->unit_num);           // 网络字节序
+    uint64_t record_start_id = be64toh(varmon_hdr_raw->record_start_id); // 网络字节序
+    uint64_t record_end_id = be64toh(varmon_hdr_raw->record_end_id);     // 网络字节序
     
-    // 第三部分：当前变量的步长 (8字节) - 需要进行大小端转换
+    // 第三部分：当前变量的步长 (8字节)
     const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
-    uint64_t current_step = be64toh(*step_ptr);
+    uint64_t current_step = *step_ptr;
     
     // 第四部分：多个数据
     const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
@@ -155,13 +155,25 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
     switch (nanomsg_hdr->event_id)
     {
         case FUNCTION_META:
-            printf("VarMon META:\n");
-            printf("  unit_num: %lu\n", unit_num);
-            printf("  record_start_id: %lu\n", record_start_id);
-            printf("  record_end_id: %lu\n", record_end_id);
-            printf("  step: %lu\n", current_step);
+            printf("VarMon META (数据描述信息):\n");
+            printf("  [nanomsg通用消息头]\n");
+            printf("    msg_type: %u (VAR_MON_FUNCTION)\n", nanomsg_hdr->msg_type);  // 不需要转换
+            printf("    version: %u\n", nanomsg_hdr->version);                      // 不需要转换
+            printf("    event_id: %u (FUNCTION_META)\n", nanomsg_hdr->event_id);     // 不需要转换
+            printf("    status_code: %u\n", nanomsg_hdr->status_code);               // 不需要转换
+            printf("    msg_len: %u\n", ntohs(nanomsg_hdr->msg_len));               // 网络字节序
+            printf("    node_id: %u\n", ntohs(nanomsg_hdr->node_id));               // 网络字节序
+            printf("    task_id: %lu\n", be64toh(nanomsg_hdr->task_id));            // 网络字节序
+            printf("    cmd_id: %lu\n", be64toh(nanomsg_hdr->cmd_id));              // 网络字节序
+            printf("  [变量监控特有消息头]\n");
+            printf("    unit_num: %lu\n", unit_num);
+            printf("    record_start_id: %lu\n", record_start_id);
+            printf("    record_end_id: %lu\n", record_end_id);
+            printf("  [步长]\n");
+            printf("    step: %lu\n", current_step);
             if(data_size > 0){
-                printf("  meta_data: %.*s\n", (int)data_size, data_ptr);
+                printf("  [元数据内容]\n");
+                printf("    meta_data: %.*s\n", (int)data_size, data_ptr);
             }
             break;
             
@@ -174,11 +186,12 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
             printf("  step: %lu\n", current_step);
             printf("  recv_num: %llu\n", recv_num);
             
-            // 根据监控单元数量解析多个数据（需要进行大小端转换）
+            // 根据监控单元数量解析多个数据
             if(unit_num > 0 && data_size >= sizeof(double) * unit_num){
                 printf("  data values (%lu units): ", unit_num);
                 for(uint64_t i = 0; i < unit_num; i++){
-                    double value = be64toh_double(data_ptr + i * sizeof(double));
+                    double value;
+                    memcpy(&value, data_ptr + i * sizeof(double), sizeof(double));
                     printf("%lf ", value);
                 }
                 printf("\n");
