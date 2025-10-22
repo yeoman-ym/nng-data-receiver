@@ -37,10 +37,43 @@ typedef struct {
     size_t    interval_steps; // 从元数据解析的间隔步数
 } meta_cache_t;
 
-static meta_cache_t g_meta_cache = {0};
-
 static inline void reset_meta_cache(meta_cache_t* cache) {
     memset(cache, 0, sizeof(*cache));
+}
+
+// --- 按 cmd_id 维护多路元数据缓存 ---
+// 注：同一任务下 cmd_id 不超过 5 个，此处预留 32 个槽位支持多任务并发
+#define MAX_META_ENTRIES 32
+typedef struct {
+    uint64_t     cmd_id;
+    meta_cache_t cache;
+    int          in_use;
+} meta_entry_t;
+
+static meta_entry_t g_meta_map[MAX_META_ENTRIES];
+
+static inline void init_meta_map(void) {
+    memset(g_meta_map, 0, sizeof(g_meta_map));
+}
+
+static inline meta_cache_t* meta_get_entry(uint64_t cmd_id, int create_if_missing) {
+    // 查找已存在的项
+    for (size_t i = 0; i < MAX_META_ENTRIES; i++) {
+        if (g_meta_map[i].in_use && g_meta_map[i].cmd_id == cmd_id) {
+            return &g_meta_map[i].cache;
+        }
+    }
+    if (!create_if_missing) return NULL;
+    // 分配新项
+    for (size_t i = 0; i < MAX_META_ENTRIES; i++) {
+        if (!g_meta_map[i].in_use) {
+            g_meta_map[i].in_use = 1;
+            g_meta_map[i].cmd_id = cmd_id;
+            reset_meta_cache(&g_meta_map[i].cache);
+            return &g_meta_map[i].cache;
+        }
+    }
+    return NULL; // 已满
 }
 
 // 在 json 文本中查找 key 对应的无符号整数值（十进制），找不到则返回 default_value
@@ -298,14 +331,20 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 printf("  [元数据内容]\n");
                 printf("    meta_data: %.*s\n", (int)body_after_header_size, body_after_header);
 
-                // 解析并缓存元数据（通用方案）
-                reset_meta_cache(&g_meta_cache);
-                g_meta_cache.unit_size = parse_number_value(body_after_header, "\"variable_monitor_unit_bytes\"", 0);
-                g_meta_cache.interval_steps = parse_number_value(body_after_header, "\"interval_steps\"", 0);
-                parse_variables_from_meta(body_after_header, &g_meta_cache);
-                printf("  [已缓存元数据] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", g_meta_cache.unit_size, g_meta_cache.interval_steps, g_meta_cache.var_count);
-                for(size_t i = 0; i < g_meta_cache.var_count; i++){
-                    printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, g_meta_cache.vars[i].name, g_meta_cache.vars[i].type, g_meta_cache.vars[i].size);
+                // 解析并缓存元数据（按 cmd_id 分组）
+                uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
+                meta_cache_t* cache = meta_get_entry(cmd_id_host, 1);
+                if (cache) {
+                    reset_meta_cache(cache);
+                    cache->unit_size = parse_number_value(body_after_header, "\"variable_monitor_unit_bytes\"", 0);
+                    cache->interval_steps = parse_number_value(body_after_header, "\"interval_steps\"", 0);
+                    parse_variables_from_meta(body_after_header, cache);
+                    printf("  [已缓存元数据][cmd_id=%lu] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", cmd_id_host, cache->unit_size, cache->interval_steps, cache->var_count);
+                    for(size_t i = 0; i < cache->var_count; i++){
+                        printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, cache->vars[i].name, cache->vars[i].type, cache->vars[i].size);
+                    }
+                } else {
+                    printf("  [WARNING] 元数据缓存已满，无法为 cmd_id=%lu 建立缓存\n", cmd_id_host);
                 }
             }
             break;
@@ -323,7 +362,12 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 const uint64_t *step_ptr = (const uint64_t *)(buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE);
                 uint64_t current_step = *step_ptr;
                 uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
-                printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, g_meta_cache.interval_steps);
+                meta_cache_t* cache = meta_get_entry(cmd_id_host, 0);
+                if (!cache) {
+                    printf("VarMon DATA [step=%lu, cmd_id=%lu]: 未找到对应META缓存，跳过详细解码\n", current_step, cmd_id_host);
+                    break;
+                }
+                printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, cache->interval_steps);
 
                 const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
                 size_t data_size = buf_size - PACKET_HEADER_SIZE - VARMON_HEADER_SIZE - sizeof(uint64_t);
@@ -332,10 +376,10 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 // 单元数量固定为1；数据区不含 steps，本地步数来自头部 current_step
                 // 若元数据携带 unit_size，则以其为准，否则按缓存的变量 size 累计
                 size_t expected_by_vars = 0;
-                for(size_t vi = 0; vi < g_meta_cache.var_count; vi++){
-                    expected_by_vars += g_meta_cache.vars[vi].size;
+                for(size_t vi = 0; vi < cache->var_count; vi++){
+                    expected_by_vars += cache->vars[vi].size;
                 }
-                size_t unit_size = g_meta_cache.unit_size ? g_meta_cache.unit_size : expected_by_vars;
+                size_t unit_size = cache->unit_size ? cache->unit_size : expected_by_vars;
 
                 if (data_size < unit_size) {
                     printf("  [WARNING] 数据总长度不足: data_size=%zu < unit_size=%zu\n", data_size, unit_size);
@@ -343,8 +387,8 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
 
                 size_t offset = 0;
                 // 打印变量名=值（按缓存的 size 与 type 解码），不包含 steps
-                for(size_t vi = 0; vi < g_meta_cache.var_count; vi++){
-                    const var_def_t* vd = &g_meta_cache.vars[vi];
+                for(size_t vi = 0; vi < cache->var_count; vi++){
+                    const var_def_t* vd = &cache->vars[vi];
                     if(offset + vd->size > data_size){
                         printf("  [WARNING] 数据不足: %s 需要%zu字节, 剩余%zu\n", vd->name, vd->size, data_size - offset);
                         break;
@@ -494,6 +538,9 @@ int main(int argc, char* argv[])
     sock = -1;
 
     slave_register_stop_signal();
+
+    // 初始化按 cmd_id 的元数据映射
+    init_meta_map();
 
     int rv;
 
