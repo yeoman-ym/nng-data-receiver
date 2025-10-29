@@ -534,7 +534,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     
-    printf("The input string is: %s\n", argv[1]);
+    //printf("The input string is: %s\n", argv[1]);
     sock = -1;
 
     slave_register_stop_signal();
