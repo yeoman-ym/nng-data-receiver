@@ -29,5 +29,7 @@ make -j$(nproc)
 echo -e "\n${GREEN}✓ 编译成功！${NC}"
 echo -e "可执行文件位于: ${BLUE}bin/user_sim_screen${NC}"
 echo -e "\n运行示例:"
-echo -e "  ${BLUE}./bin/user_sim_screen tcp://0.0.0.0:11112${NC}"
+echo -e "  ${BLUE}./bin/user_sim_screen 11112${NC}"
+echo -e "  ${BLUE}./bin/user_sim_screen 127.0.0.1 11112${NC}"
+echo -e "  ${BLUE}./bin/user_sim_screen 192.168.1.100 11112${NC}"
 

@@ -529,12 +529,32 @@ void  parse_task_status(char* buf){
 
 int main(int argc, char* argv[])
 {
+    char bind_addr[256];
+    char* ip = "0.0.0.0";
+    char* port;
+    
     if (argc < 2) {
-        printf("Usage: %s tcp://0.0.0.0:11112\n", argv[0]);
+        printf("Usage: %s <port> | %s <ip> <port>\n", argv[0], argv[0]);
+        printf("  <port>: 监听端口号 (IP默认为 0.0.0.0)\n");
+        printf("  <ip> <port>: IP地址和端口号\n");
+        printf("Examples:\n");
+        printf("  %s 11112\n", argv[0]);
+        printf("  %s 127.0.0.1 11112\n", argv[0]);
+        printf("  %s 192.168.1.100 11112\n", argv[0]);
         return 1;
     }
     
-    //printf("The input string is: %s\n", argv[1]);
+    if (argc == 2) {
+        // 只有一个参数，作为端口号，IP使用默认值
+        port = argv[1];
+    } else {
+        // 两个参数，第一个是IP，第二个是端口
+        ip = argv[1];
+        port = argv[2];
+    }
+    
+    snprintf(bind_addr, sizeof(bind_addr), "tcp://%s:%s", ip, port);
+    
     sock = -1;
 
     slave_register_stop_signal();
@@ -548,10 +568,10 @@ int main(int argc, char* argv[])
         fatal("nn_socket");
     }
 
-    if ((rv = nn_bind(sock, argv[1])) < 0) {
+    if ((rv = nn_bind(sock, bind_addr)) < 0) {
         fatal("nn_bind");
     }
-    printf("nanomsg server start at:%s\n", argv[1]);
+    printf("nanomsg server start at: %s\n", bind_addr);
     
     for (;;) {
         char* buf = NULL;
