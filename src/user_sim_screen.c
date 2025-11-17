@@ -26,6 +26,11 @@
 int sock;
 FILE* g_log_file = NULL;  // 全局日志文件句柄
 
+// 日志行缓冲（用于处理可能被分包的日志行）
+#define LOG_LINE_BUFFER_SIZE 8192
+static char g_log_line_buffer[LOG_LINE_BUFFER_SIZE];
+static size_t g_log_line_buffer_len = 0;
+
 // -------------------- 元数据解析与缓存 --------------------
 typedef struct {
     char     name[128];      // 变量名
@@ -94,8 +99,18 @@ static int open_log_file(void) {
     return 0;
 }
 
+// 前向声明
+static void log_printf(const char* format, ...);
+
 // 关闭日志文件
 static void close_log_file(void) {
+    // 输出缓冲区中剩余的日志内容（如果有）
+    if (g_log_line_buffer_len > 0) {
+        g_log_line_buffer[g_log_line_buffer_len] = '\0';
+        log_printf("%s\n", g_log_line_buffer);
+        g_log_line_buffer_len = 0;
+    }
+    
     if (g_log_file != NULL) {
         fflush(g_log_file);
         fclose(g_log_file);
@@ -564,20 +579,78 @@ void print_message_body(const char *buf, size_t buf_size) {
         return;
     }
     
-    // 检查日志内容是否已经包含换行符
-    // 如果推送方是一行一行推送，直接输出日志内容，确保有换行符结尾
-    int has_newline = 0;
-    if (body_size > 0 && body[body_size - 1] == '\n') {
-        has_newline = 1;
-    }
+    // 处理可能被分包的日志行：逐字符处理，遇到换行符才输出完整行
+    // 支持 \n (Unix) 和 \r\n (Windows) 两种换行符格式
+    const char *p = body;
+    const char *end = body + body_size;
     
-    // 直接输出日志内容，不添加额外前缀（推送方已经是一行一行推送）
-    if (has_newline) {
-        // 已经包含换行符，直接输出
-        log_printf("%.*s", (int)body_size, body);
-    } else {
-        // 没有换行符，添加换行符
-        log_printf("%.*s\n", (int)body_size, body);
+    while (p < end) {
+        // 查找换行符（\n）
+        const char *newline = (const char *)memchr(p, '\n', end - p);
+        
+        if (newline != NULL) {
+            // 检查是否是 \r\n (Windows风格)
+            // 计算这一段的长度（从 p 到 newline+1，包含换行符）
+            size_t segment_len = newline - p + 1;  // 包含 \n
+            // 如果前面有 \r，segment_len 已经包含了 \r（因为 p 到 newline 之间包含了 \r）
+            
+            // 检查缓冲区是否有空间
+            if (g_log_line_buffer_len + segment_len < LOG_LINE_BUFFER_SIZE) {
+                // 将当前段追加到缓冲区（从 p 开始，包含换行符）
+                memcpy(g_log_line_buffer + g_log_line_buffer_len, p, segment_len);
+                g_log_line_buffer_len += segment_len;
+            } else {
+                // 缓冲区空间不足，先输出缓冲区内容，然后处理当前段
+                if (g_log_line_buffer_len > 0) {
+                    g_log_line_buffer[g_log_line_buffer_len] = '\0';
+                    log_printf("%s", g_log_line_buffer);
+                    g_log_line_buffer_len = 0;
+                }
+                // 如果当前段本身就很长，直接输出
+                if (segment_len < LOG_LINE_BUFFER_SIZE) {
+                    memcpy(g_log_line_buffer, p, segment_len);
+                    g_log_line_buffer_len = segment_len;
+                } else {
+                    // 段太长，直接输出
+                    log_printf("%.*s", (int)segment_len, p);
+                    p = newline + 1;
+                    continue;
+                }
+            }
+            
+            // 输出完整的行（包含换行符）
+            if (g_log_line_buffer_len > 0) {
+                g_log_line_buffer[g_log_line_buffer_len] = '\0';
+                log_printf("%s", g_log_line_buffer);
+                g_log_line_buffer_len = 0;
+            }
+            
+            // 跳过换行符，继续处理下一行
+            p = newline + 1;
+        } else {
+            // 没有找到换行符，将剩余内容追加到缓冲区
+            size_t remaining = end - p;
+            if (g_log_line_buffer_len + remaining < LOG_LINE_BUFFER_SIZE) {
+                memcpy(g_log_line_buffer + g_log_line_buffer_len, p, remaining);
+                g_log_line_buffer_len += remaining;
+            } else {
+                // 缓冲区空间不足，先输出缓冲区内容
+                if (g_log_line_buffer_len > 0) {
+                    g_log_line_buffer[g_log_line_buffer_len] = '\0';
+                    log_printf("%s", g_log_line_buffer);
+                    g_log_line_buffer_len = 0;
+                }
+                // 如果剩余内容本身就很长，直接输出（不完整行）
+                if (remaining < LOG_LINE_BUFFER_SIZE) {
+                    memcpy(g_log_line_buffer, p, remaining);
+                    g_log_line_buffer_len = remaining;
+                } else {
+                    // 剩余内容太长，直接输出
+                    log_printf("%.*s", (int)remaining, p);
+                }
+            }
+            break;
+        }
     }
 }
 
