@@ -15,12 +15,16 @@
 #include <nanomsg/pipeline.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <errno.h>
+#include <time.h>
 #include "packet_header/packet_header.h"
 
 #define MAX_BUFFER_SIZE 4096
+#define LOG_FILENAME_MAX 256
 
 int sock;
+FILE* g_log_file = NULL;  // 全局日志文件句柄
 
 // -------------------- 元数据解析与缓存 --------------------
 typedef struct {
@@ -54,6 +58,80 @@ static meta_entry_t g_meta_map[MAX_META_ENTRIES];
 
 static inline void init_meta_map(void) {
     memset(g_meta_map, 0, sizeof(g_meta_map));
+}
+
+// -------------------- 日志文件管理 --------------------
+// 打开日志文件，文件名格式：log_YYYYMMDD_HHMMSS.txt
+static int open_log_file(void) {
+    if (g_log_file != NULL) {
+        return 0;  // 已经打开
+    }
+    
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    if (!tm_info) {
+        return -1;
+    }
+    
+    char log_filename[LOG_FILENAME_MAX];
+    snprintf(log_filename, sizeof(log_filename), 
+             "log_%04d%02d%02d_%02d%02d%02d.txt",
+             tm_info->tm_year + 1900,
+             tm_info->tm_mon + 1,
+             tm_info->tm_mday,
+             tm_info->tm_hour,
+             tm_info->tm_min,
+             tm_info->tm_sec);
+    
+    g_log_file = fopen(log_filename, "a");
+    if (g_log_file == NULL) {
+        return -1;
+    }
+    
+    // 设置文件缓冲为行缓冲，确保及时写入
+    setvbuf(g_log_file, NULL, _IOLBF, 0);
+    
+    return 0;
+}
+
+// 关闭日志文件
+static void close_log_file(void) {
+    if (g_log_file != NULL) {
+        fflush(g_log_file);
+        fclose(g_log_file);
+        g_log_file = NULL;
+    }
+}
+
+// 同时输出到终端和日志文件的printf函数
+static void log_printf(const char* format, ...) {
+    va_list args;
+    char buffer[MAX_BUFFER_SIZE];
+    
+    // 格式化字符串
+    va_start(args, format);
+    int len = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    if (len < 0) {
+        return;  // 格式化失败
+    }
+    
+    // 确保不超过缓冲区大小
+    if (len >= (int)sizeof(buffer)) {
+        len = sizeof(buffer) - 1;
+        buffer[len] = '\0';
+    }
+    
+    // 输出到终端
+    fputs(buffer, stdout);
+    fflush(stdout);
+    
+    // 输出到日志文件
+    if (g_log_file != NULL) {
+        fputs(buffer, g_log_file);
+        fflush(g_log_file);
+    }
 }
 
 static inline meta_cache_t* meta_get_entry(uint64_t cmd_id, int create_if_missing) {
@@ -153,53 +231,53 @@ static void print_value_by_type(const char* name, const char* type, const char* 
     if (type && strstr(type, "DOUBLE") && size == sizeof(double)) {
         double dv;
         memcpy(&dv, data, sizeof(double));
-        printf("%s=%lf", name, dv);
+        log_printf("%s=%lf", name, dv);
         return;
     }
     if (type && strstr(type, "UINT64") && size == sizeof(uint64_t)) {
         uint64_t v; memcpy(&v, data, sizeof(uint64_t));
-        printf("%s=%lu", name, (unsigned long)v);
+        log_printf("%s=%lu", name, (unsigned long)v);
         return;
     }
     if (type && strstr(type, "INT64") && size == sizeof(int64_t)) {
         int64_t v; memcpy(&v, data, sizeof(int64_t));
-        printf("%s=%ld", name, (long)v);
+        log_printf("%s=%ld", name, (long)v);
         return;
     }
     if (type && strstr(type, "UINT32") && size == sizeof(uint32_t)) {
         uint32_t v; memcpy(&v, data, sizeof(uint32_t));
-        printf("%s=%u", name, v);
+        log_printf("%s=%u", name, v);
         return;
     }
     if (type && strstr(type, "INT32") && size == sizeof(int32_t)) {
         int32_t v; memcpy(&v, data, sizeof(int32_t));
-        printf("%s=%d", name, v);
+        log_printf("%s=%d", name, v);
         return;
     }
     if (type && strstr(type, "UINT16") && size == sizeof(uint16_t)) {
         uint16_t v; memcpy(&v, data, sizeof(uint16_t));
-        printf("%s=%u", name, (unsigned)v);
+        log_printf("%s=%u", name, (unsigned)v);
         return;
     }
     if (type && strstr(type, "INT16") && size == sizeof(int16_t)) {
         int16_t v; memcpy(&v, data, sizeof(int16_t));
-        printf("%s=%d", name, (int)v);
+        log_printf("%s=%d", name, (int)v);
         return;
     }
     if (type && strstr(type, "UINT8") && size == sizeof(uint8_t)) {
         uint8_t v; memcpy(&v, data, sizeof(uint8_t));
-        printf("%s=%u", name, (unsigned)v);
+        log_printf("%s=%u", name, (unsigned)v);
         return;
     }
     if (type && strstr(type, "INT8") && size == sizeof(int8_t)) {
         int8_t v; memcpy(&v, data, sizeof(int8_t));
-        printf("%s=%d", name, (int)v);
+        log_printf("%s=%d", name, (int)v);
         return;
     }
     // 未识别的类型，按十六进制输出
-    printf("%s=0x", name);
+    log_printf("%s=0x", name);
     for (size_t i = 0; i < size; i++) {
-        printf("%02x", (unsigned char)data[i]);
+        log_printf("%02x", (unsigned char)data[i]);
     }
 }
 
@@ -244,6 +322,7 @@ void ctrlc_handle(int sig)
                 nn_close(sock);
                 sock = -1;
             }
+            close_log_file();  // 关闭日志文件
         break;
     }
 }
@@ -282,21 +361,21 @@ static inline double be64toh_double(const void* ptr) {
 
 void  parse_record_finish(const char *buf, size_t buf_size){
     if(buf == NULL){
-        printf("buf is null\n");
+        log_printf("buf is null\n");
         return;
     }
     const char *body = buf + PACKET_HEADER_SIZE;  // 跳过消息头
     size_t body_size = buf_size - PACKET_HEADER_SIZE;
     switch ((unsigned char)buf[2]){
         case FUNCTION_FINISH:
-            printf("[###RECORD_FINISH###]\n");
+            log_printf("[###RECORD_FINISH###]\n");
             if(body_size > 0){
-                printf("Message Body: %.*s\n", (int)body_size, body);
+                log_printf("Message Body: %.*s\n", (int)body_size, body);
             }
             break;
     
         default:
-            printf("[###UNKNOWN type %d###]\n",buf[2]);
+            log_printf("[###UNKNOWN type %d###]\n",buf[2]);
             break;
     }
 }
@@ -304,7 +383,7 @@ void  parse_record_finish(const char *buf, size_t buf_size){
 
 void  parse_varmon_data(const char *buf, size_t buf_size){
     if(buf == NULL){
-        printf("buf is null\n");
+        log_printf("buf is null\n");
         return;
     }
     
@@ -317,19 +396,19 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
     switch (nanomsg_hdr->event_id)
     {
         case FUNCTION_META:
-            printf("VarMon META (数据描述信息):\n");
-            printf("  [nanomsg通用消息头]\n");
-            printf("    msg_type: %u (VAR_MON_FUNCTION)\n", nanomsg_hdr->msg_type);  // 不需要转换
-            printf("    version: %u\n", nanomsg_hdr->version);                      // 不需要转换
-            printf("    event_id: %u (FUNCTION_META)\n", nanomsg_hdr->event_id);     // 不需要转换
-            printf("    status_code: %u\n", nanomsg_hdr->status_code);               // 不需要转换
-            printf("    msg_len: %u\n", ntohs(nanomsg_hdr->msg_len));               // 网络字节序
-            printf("    node_id: %u\n", ntohs(nanomsg_hdr->node_id));               // 网络字节序
-            printf("    task_id: %lu\n", be64toh(nanomsg_hdr->task_id));            // 网络字节序
-            printf("    cmd_id: %lu\n", be64toh(nanomsg_hdr->cmd_id));              // 网络字节序
+            log_printf("VarMon META (数据描述信息):\n");
+            log_printf("  [nanomsg通用消息头]\n");
+            log_printf("    msg_type: %u (VAR_MON_FUNCTION)\n", nanomsg_hdr->msg_type);  // 不需要转换
+            log_printf("    version: %u\n", nanomsg_hdr->version);                      // 不需要转换
+            log_printf("    event_id: %u (FUNCTION_META)\n", nanomsg_hdr->event_id);     // 不需要转换
+            log_printf("    status_code: %u\n", nanomsg_hdr->status_code);               // 不需要转换
+            log_printf("    msg_len: %u\n", ntohs(nanomsg_hdr->msg_len));               // 网络字节序
+            log_printf("    node_id: %u\n", ntohs(nanomsg_hdr->node_id));               // 网络字节序
+            log_printf("    task_id: %lu\n", be64toh(nanomsg_hdr->task_id));            // 网络字节序
+            log_printf("    cmd_id: %lu\n", be64toh(nanomsg_hdr->cmd_id));              // 网络字节序
             if(body_after_header_size > 0){
-                printf("  [元数据内容]\n");
-                printf("    meta_data: %.*s\n", (int)body_after_header_size, body_after_header);
+                log_printf("  [元数据内容]\n");
+                log_printf("    meta_data: %.*s\n", (int)body_after_header_size, body_after_header);
 
                 // 解析并缓存元数据（按 cmd_id 分组）
                 uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
@@ -339,12 +418,12 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                     cache->unit_size = parse_number_value(body_after_header, "\"variable_monitor_unit_bytes\"", 0);
                     cache->interval_steps = parse_number_value(body_after_header, "\"interval_steps\"", 0);
                     parse_variables_from_meta(body_after_header, cache);
-                    printf("  [已缓存元数据][cmd_id=%lu] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", cmd_id_host, cache->unit_size, cache->interval_steps, cache->var_count);
+                    log_printf("  [已缓存元数据][cmd_id=%lu] unit_size=%zu, interval_steps=%zu, var_count=%zu\n", cmd_id_host, cache->unit_size, cache->interval_steps, cache->var_count);
                     for(size_t i = 0; i < cache->var_count; i++){
-                        printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, cache->vars[i].name, cache->vars[i].type, cache->vars[i].size);
+                        log_printf("    var[%zu]: name=\"%s\", type=\"%s\", size=%zu\n", i, cache->vars[i].name, cache->vars[i].type, cache->vars[i].size);
                     }
                 } else {
-                    printf("  [WARNING] 元数据缓存已满，无法为 cmd_id=%lu 建立缓存\n", cmd_id_host);
+                    log_printf("  [WARNING] 元数据缓存已满，无法为 cmd_id=%lu 建立缓存\n", cmd_id_host);
                 }
             }
             break;
@@ -352,7 +431,7 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
         case FUNCTION_DATA:
             // DATA 需要满足最小长度（含 varmon 头 + 步长）
             if (buf_size < PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t)){
-                printf("VarMon DATA packet too short: %zu bytes\n", buf_size);
+                log_printf("VarMon DATA packet too short: %zu bytes\n", buf_size);
                 break;
             }
             {
@@ -364,10 +443,10 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 uint64_t cmd_id_host = be64toh(nanomsg_hdr->cmd_id);
                 meta_cache_t* cache = meta_get_entry(cmd_id_host, 0);
                 if (!cache) {
-                    printf("VarMon DATA [step=%lu, cmd_id=%lu]: 未找到对应META缓存，跳过详细解码\n", current_step, cmd_id_host);
+                    log_printf("VarMon DATA [step=%lu, cmd_id=%lu]: 未找到对应META缓存，跳过详细解码\n", current_step, cmd_id_host);
                     break;
                 }
-                printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, cache->interval_steps);
+                log_printf("VarMon DATA [step=%lu, cmd_id=%lu, interval_steps=%zu]:\n", current_step, cmd_id_host, cache->interval_steps);
 
                 const char *data_ptr = buf + PACKET_HEADER_SIZE + VARMON_HEADER_SIZE + sizeof(uint64_t);
                 size_t data_size = buf_size - PACKET_HEADER_SIZE - VARMON_HEADER_SIZE - sizeof(uint64_t);
@@ -382,7 +461,7 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 size_t unit_size = cache->unit_size ? cache->unit_size : expected_by_vars;
 
                 if (data_size < unit_size) {
-                    printf("  [WARNING] 数据总长度不足: data_size=%zu < unit_size=%zu\n", data_size, unit_size);
+                    log_printf("  [WARNING] 数据总长度不足: data_size=%zu < unit_size=%zu\n", data_size, unit_size);
                 }
 
                 size_t offset = 0;
@@ -390,36 +469,36 @@ void  parse_varmon_data(const char *buf, size_t buf_size){
                 for(size_t vi = 0; vi < cache->var_count; vi++){
                     const var_def_t* vd = &cache->vars[vi];
                     if(offset + vd->size > data_size){
-                        printf("  [WARNING] 数据不足: %s 需要%zu字节, 剩余%zu\n", vd->name, vd->size, data_size - offset);
+                        log_printf("  [WARNING] 数据不足: %s 需要%zu字节, 剩余%zu\n", vd->name, vd->size, data_size - offset);
                         break;
                     }
-                    printf("  ");
+                    log_printf("  ");
                     print_value_by_type(vd->name, vd->type, data_ptr + offset, vd->size);
-                    printf("\n");
+                    log_printf("\n");
                     offset += vd->size;
                 }
                 } else {
-                    printf("  [WARNING] data_size=%zu, unit_num=%lu\n", data_size, unit_num);
+                    log_printf("  [WARNING] data_size=%zu, unit_num=%lu\n", data_size, unit_num);
                 }
             }
             break;
             
         case FUNCTION_FINISH:
-            printf("VarMon FINISH\n");
+            log_printf("VarMon FINISH\n");
             if(body_after_header_size > 0){
-                printf("  finish_data: %.*s\n", (int)body_after_header_size, body_after_header);
+                log_printf("  finish_data: %.*s\n", (int)body_after_header_size, body_after_header);
             }
             break;
             
         default:
-            printf("[###UNKNOWN var mon type %d###]\n", nanomsg_hdr->event_id);
+            log_printf("[###UNKNOWN var mon type %d###]\n", nanomsg_hdr->event_id);
             break;
     }
 }
 
 void  parse_read_data(const char *buf, size_t buf_size){
     if(buf == NULL){
-        printf("buf is null\n");
+        log_printf("buf is null\n");
         return;
     }
     double data_value_double;
@@ -430,25 +509,25 @@ void  parse_read_data(const char *buf, size_t buf_size){
     switch (buf[2])
     {
         case FUNCTION_META:
-            printf("VarRead META: %.*s\n", (int)body_size, head);
+            log_printf("VarRead META: %.*s\n", (int)body_size, head);
             break;
         case FUNCTION_DATA:
             memcpy(&data_value_uint64, body, sizeof(uint64_t));
             memcpy(&data_value_double, body + sizeof(uint64_t), sizeof(double));
-            printf("VarRead DATA: uint64_t:%lu, double:%lf\n", data_value_uint64, data_value_double);
+            log_printf("VarRead DATA: uint64_t:%lu, double:%lf\n", data_value_uint64, data_value_double);
             break;
         case FUNCTION_FINISH:
-            printf("VarRead FINISH: %.*s\n", (int)body_size, head);
+            log_printf("VarRead FINISH: %.*s\n", (int)body_size, head);
             break;
         default:
-            printf("[###UNKNOWN var mon type %d###]\n",buf[2]);
+            log_printf("[###UNKNOWN var mon type %d###]\n",buf[2]);
             break;
     }
 }
 
 void  parse_step_debug_data(const char *buf, size_t buf_size){
     if(buf == NULL){
-        printf("buf is null\n");
+        log_printf("buf is null\n");
         return;
     }
     const char *head = buf + PACKET_HEADER_SIZE;  // 跳过消息头
@@ -456,23 +535,23 @@ void  parse_step_debug_data(const char *buf, size_t buf_size){
     switch (buf[2])
     {
         case DEBUG_STATUS_OFF:
-            printf("DEBUG_STATUS_OFF\n");
+            log_printf("DEBUG_STATUS_OFF\n");
             break;
         case DEBUG_STATUS_WAITING:
-            printf("DEBUG_STATUS_WAITING\n");
+            log_printf("DEBUG_STATUS_WAITING\n");
             break;
         case DEBUG_STATUS_SUSPEND:
-            printf("DEBUG_STATUS_SUSPEND\n");
-            printf("Step debug message:\n %.*s\n", (int)body_size, head);
+            log_printf("DEBUG_STATUS_SUSPEND\n");
+            log_printf("Step debug message:\n %.*s\n", (int)body_size, head);
             break;
         case DEBUG_STATUS_RUNNING:
-            printf("DEBUG_STATUS_RUNNING\n");
+            log_printf("DEBUG_STATUS_RUNNING\n");
             break;
         case DEBUG_STATUS_EXIT:
-            printf("DEBUG_STATUS_EXIT\n");
+            log_printf("DEBUG_STATUS_EXIT\n");
             break;
         default:
-            printf("[###UNKNOWN var mon type %d###]\n",buf[2]);
+            log_printf("[###UNKNOWN var mon type %d###]\n",buf[2]);
             break;
     }
 }
@@ -480,49 +559,67 @@ void  parse_step_debug_data(const char *buf, size_t buf_size){
 void print_message_body(const char *buf, size_t buf_size) {
     const char *body = buf + PACKET_HEADER_SIZE;  // 跳过消息头
     size_t body_size = buf_size - PACKET_HEADER_SIZE;
-
-    printf("Log message:\n %.*s\n", (int)body_size, body);
+    
+    if (body_size == 0) {
+        return;
+    }
+    
+    // 检查日志内容是否已经包含换行符
+    // 如果推送方是一行一行推送，直接输出日志内容，确保有换行符结尾
+    int has_newline = 0;
+    if (body_size > 0 && body[body_size - 1] == '\n') {
+        has_newline = 1;
+    }
+    
+    // 直接输出日志内容，不添加额外前缀（推送方已经是一行一行推送）
+    if (has_newline) {
+        // 已经包含换行符，直接输出
+        log_printf("%.*s", (int)body_size, body);
+    } else {
+        // 没有换行符，添加换行符
+        log_printf("%.*s\n", (int)body_size, body);
+    }
 }
 
 void  parse_task_status(char* buf){
     if(buf == NULL){
-        printf("buf is null\n");
+        log_printf("buf is null\n");
         return;
     }
     switch ((unsigned char)buf[2])
     {
         case SIMULATION_STARTED:
-            printf("[###SIMULATION_STARTED###]\n");
+            log_printf("[###SIMULATION_STARTED###]\n");
             break;
         case INITIALIZING_CORE_RESOURCES:
-            printf("[###INITIALIZING_CORE_RESOURCES###]\n");
+            log_printf("[###INITIALIZING_CORE_RESOURCES###]\n");
             break;
         case LOADING_SO:
-            printf("[###LOADING_SO###]\n");
+            log_printf("[###LOADING_SO###]\n");
             break;
         case LOADING_MODEL:
-            printf("[###LOADING_MODEL###]\n");
+            log_printf("[###LOADING_MODEL###]\n");
             break;
         case EXECUTING_FB_INIT:
-            printf("[###EXECUTING_FB_INIT###]\n");
+            log_printf("[###EXECUTING_FB_INIT###]\n");
             break;
         case WARMUP_STAGE:
-            printf("[###WARMUP_STAGE###]\n");
+            log_printf("[###WARMUP_STAGE###]\n");
             break;
         case RUNNING:
-            printf("[###RUNNING###]\n");
+            log_printf("[###RUNNING###]\n");
             break;
         case RESOURCE_COLLECTION:
-            printf("[###RESOURCE_COLLECTION###]\n");
+            log_printf("[###RESOURCE_COLLECTION###]\n");
             break;
         case SIMULATION_COMPLETED:
-            printf("[###SIMULATION_COMPLETED###]\n");
+            log_printf("[###SIMULATION_COMPLETED###]\n");
             break;
         case SIMULATION_FAILED:
-            printf("[###SIMULATION_FAILED###]\n");
+            log_printf("[###SIMULATION_FAILED###]\n");
             break;
         default:
-            printf("[###UNKNOWN type %d###]\n",buf[2]);
+            log_printf("[###UNKNOWN type %d###]\n",buf[2]);
             break;
     }
 }
@@ -534,13 +631,13 @@ int main(int argc, char* argv[])
     char* port;
     
     if (argc < 2) {
-        printf("Usage: %s <port> | %s <ip> <port>\n", argv[0], argv[0]);
-        printf("  <port>: 监听端口号 (IP默认为 0.0.0.0)\n");
-        printf("  <ip> <port>: IP地址和端口号\n");
-        printf("Examples:\n");
-        printf("  %s 11112\n", argv[0]);
-        printf("  %s 127.0.0.1 11112\n", argv[0]);
-        printf("  %s 192.168.1.100 11112\n", argv[0]);
+        fprintf(stderr, "Usage: %s <port> | %s <ip> <port>\n", argv[0], argv[0]);
+        fprintf(stderr, "  <port>: 监听端口号 (IP默认为 0.0.0.0)\n");
+        fprintf(stderr, "  <ip> <port>: IP地址和端口号\n");
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s 11112\n", argv[0]);
+        fprintf(stderr, "  %s 127.0.0.1 11112\n", argv[0]);
+        fprintf(stderr, "  %s 192.168.1.100 11112\n", argv[0]);
         return 1;
     }
     
@@ -571,7 +668,13 @@ int main(int argc, char* argv[])
     if ((rv = nn_bind(sock, bind_addr)) < 0) {
         fatal("nn_bind");
     }
-    printf("nanomsg server start at: %s\n", bind_addr);
+    
+    // 打开日志文件
+    if (open_log_file() != 0) {
+        fprintf(stderr, "Warning: Failed to open log file, logging to file disabled\n");
+    }
+    
+    log_printf("nanomsg server start at: %s\n", bind_addr);
     
     for (;;) {
         char* buf = NULL;
@@ -586,7 +689,7 @@ int main(int argc, char* argv[])
         }
 
         if (bytes < PACKET_HEADER_SIZE) {
-            printf("Received packet is too short: %d bytes\n", bytes);
+            log_printf("Received packet is too short: %d bytes\n", bytes);
             nn_freemsg(buf);
         }
         
@@ -611,11 +714,12 @@ int main(int argc, char* argv[])
                 parse_step_debug_data(buf, bytes);
                 break;
             default:
-                printf("[###UNKNOWN type %d###]\n",buf[0]);
+                log_printf("[###UNKNOWN type %d###]\n",buf[0]);
                 break;
         }
         nn_freemsg(buf);
     }
     
+    close_log_file();
     return 0;
 }
