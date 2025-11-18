@@ -25,6 +25,7 @@
 
 int sock;
 FILE* g_log_file = NULL;  // 全局日志文件句柄
+static int g_enable_log_file = 1;  // 是否启用日志文件（默认启用）
 
 // 日志行缓冲（用于处理可能被分包的日志行）
 #define LOG_LINE_BUFFER_SIZE 8192
@@ -701,26 +702,54 @@ int main(int argc, char* argv[])
 {
     char bind_addr[256];
     char* ip = "0.0.0.0";
-    char* port;
+    char* port = NULL;
+    int arg_idx = 1;
     
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <port> | %s <ip> <port>\n", argv[0], argv[0]);
-        fprintf(stderr, "  <port>: 监听端口号 (IP默认为 0.0.0.0)\n");
-        fprintf(stderr, "  <ip> <port>: IP地址和端口号\n");
-        fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  %s 11112\n", argv[0]);
-        fprintf(stderr, "  %s 127.0.0.1 11112\n", argv[0]);
-        fprintf(stderr, "  %s 192.168.1.100 11112\n", argv[0]);
+    // 解析命令行参数
+    while (arg_idx < argc) {
+        if (strcmp(argv[arg_idx], "--no-log-file") == 0 || strcmp(argv[arg_idx], "-n") == 0) {
+            g_enable_log_file = 0;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
+            fprintf(stderr, "Usage: %s [OPTIONS] <port> | %s [OPTIONS] <ip> <port>\n", argv[0], argv[0]);
+            fprintf(stderr, "Options:\n");
+            fprintf(stderr, "  -n, --no-log-file    禁用本地日志文件（只输出到终端）\n");
+            fprintf(stderr, "  -h, --help           显示此帮助信息\n");
+            fprintf(stderr, "\nArguments:\n");
+            fprintf(stderr, "  <port>: 监听端口号 (IP默认为 0.0.0.0)\n");
+            fprintf(stderr, "  <ip> <port>: IP地址和端口号\n");
+            fprintf(stderr, "\nExamples:\n");
+            fprintf(stderr, "  %s 11112\n", argv[0]);
+            fprintf(stderr, "  %s 127.0.0.1 11112\n", argv[0]);
+            fprintf(stderr, "  %s --no-log-file 11112\n", argv[0]);
+            fprintf(stderr, "  %s -n 192.168.1.100 11112\n", argv[0]);
+            return 1;
+        } else {
+            break;  // 遇到非选项参数，退出循环
+        }
+    }
+    
+    // 检查剩余参数数量
+    int remaining_args = argc - arg_idx;
+    if (remaining_args < 1) {
+        fprintf(stderr, "Error: 缺少必需的参数\n");
+        fprintf(stderr, "Usage: %s [OPTIONS] <port> | %s [OPTIONS] <ip> <port>\n", argv[0], argv[0]);
+        fprintf(stderr, "Use --help for more information.\n");
         return 1;
     }
     
-    if (argc == 2) {
+    if (remaining_args == 1) {
         // 只有一个参数，作为端口号，IP使用默认值
-        port = argv[1];
-    } else {
+        port = argv[arg_idx];
+    } else if (remaining_args == 2) {
         // 两个参数，第一个是IP，第二个是端口
-        ip = argv[1];
-        port = argv[2];
+        ip = argv[arg_idx];
+        port = argv[arg_idx + 1];
+    } else {
+        fprintf(stderr, "Error: 参数过多\n");
+        fprintf(stderr, "Usage: %s [OPTIONS] <port> | %s [OPTIONS] <ip> <port>\n", argv[0], argv[0]);
+        fprintf(stderr, "Use --help for more information.\n");
+        return 1;
     }
     
     snprintf(bind_addr, sizeof(bind_addr), "tcp://%s:%s", ip, port);
@@ -742,9 +771,13 @@ int main(int argc, char* argv[])
         fatal("nn_bind");
     }
     
-    // 打开日志文件
-    if (open_log_file() != 0) {
-        fprintf(stderr, "Warning: Failed to open log file, logging to file disabled\n");
+    // 根据配置决定是否打开日志文件
+    if (g_enable_log_file) {
+        if (open_log_file() != 0) {
+            fprintf(stderr, "Warning: Failed to open log file, logging to file disabled\n");
+        }
+    } else {
+        log_printf("日志文件已禁用，仅输出到终端\n");
     }
     
     log_printf("nanomsg server start at: %s\n", bind_addr);
